@@ -1,20 +1,20 @@
 """
-Bot de Discord para Registro de Horas en Odoo
+Bot de Discord para Registro de Horas en Jibble
 Funcionalidades:
 - Registro de horas de trabajo
 - Control de entrada/salida (clock in/out)
 - Consulta de horas trabajadas
-- Reportes diarios/semanales
-- Integración con API de Odoo
+- Sincronización automática con Jibble
+- Gestión de pausas (breaks)
+- Integración con API de Jibble
 """
 
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 import json
-import os
 
 from src import JibbleAPI, WorkSession, DISCORD_BOT_TOKEN, USER_MAPPING_FILE, JIBBLE_PROJECT_ID, ROLE_ACTIVE_ID, ROLE_BREAK_ID, ROLE_INACTIVE_ID
 
@@ -59,8 +59,9 @@ class TimeTrackingBot(commands.Bot):
 
     async def on_ready(self):
         """Evento cuando el bot está listo"""
+        from src import __version__
         print(f"Bot conectado como {self.user}")
-        print("--- Versión: 2.1.1 (Jibble Interaction Fix) ---")
+        print(f"--- ZoroBot Versión: {__version__} ---")
         print("Bot listo para registrar en Jibble")
 
         # Iniciar tareas programadas
@@ -82,10 +83,6 @@ class TimeTrackingBot(commands.Bot):
 
     async def update_user_role(self, member: discord.Member, status: str):
         """Actualizar roles del usuario según su estado (Active, Break, Inactive)"""
-        if not member.guild_permissions.manage_roles:
-            # Si el bot no tiene permisos, no hacemos nada (pero el bot mismo debe tenerlos)
-            pass
-
         role_map = {
             "Active": ROLE_ACTIVE_ID,
             "Break": ROLE_BREAK_ID,
@@ -94,23 +91,43 @@ class TimeTrackingBot(commands.Bot):
 
         target_role_id = role_map.get(status)
         if not target_role_id:
+            print(f"⚠️ No se encontró ID de rol para el estado: {status}")
             return
 
         try:
+            # Verificar que el bot tenga permisos para gestionar roles
+            bot_member = member.guild.get_member(self.user.id)
+            if not bot_member or not bot_member.guild_permissions.manage_roles:
+                print(f"⚠️ El bot no tiene permisos para gestionar roles en {member.guild.name}")
+                return
+
             # Obtener objetos de rol
             roles_to_remove = [int(rid) for rid in role_map.values() if rid and int(rid) != int(target_role_id)]
             role_to_add = member.guild.get_role(int(target_role_id))
 
+            if not role_to_add:
+                print(f"⚠️ No se encontró el rol con ID {target_role_id} en el servidor")
+                return
+
             # Remover roles de otros estados
+            removed_roles = []
             for r_id in roles_to_remove:
                 r = member.guild.get_role(r_id)
-                if r in member.roles:
+                if r and r in member.roles:
                     await member.remove_roles(r)
+                    removed_roles.append(r.name)
 
             # Añadir el nuevo rol si no lo tiene
-            if role_to_add and role_to_add not in member.roles:
+            if role_to_add not in member.roles:
                 await member.add_roles(role_to_add)
+                print(f"✅ Rol actualizado para {member.name}: {status} (Rol: {role_to_add.name})")
+                if removed_roles:
+                    print(f"   Roles removidos: {', '.join(removed_roles)}")
+            else:
+                print(f"ℹ️ {member.name} ya tiene el rol {role_to_add.name}")
                 
+        except discord.Forbidden:
+            print(f"❌ Sin permisos para actualizar roles de {member.name} (Forbidden)")
         except Exception as e:
             print(f"⚠️ Error al actualizar roles para {member.name}: {str(e)}")
 
@@ -244,22 +261,38 @@ async def clock_out(
 
     # Registrar salida en Jibble
     try:
-        # Usar el ID del proyecto guardado en la sesión
-        project_id = session.get("project_id")
+        # Usar el ID del proyecto guardado en la sesión local
+        project_id = None
+        if session:
+            project_id = session.get("project_id")
+            
+            # Si no hay ID (sesión antigua) o es un nombre, intentar resolverlo
+            if not project_id or "-" not in str(project_id):
+                project_name = project_id or session.get("project", "")
+                resolved_id = await bot.jibble.get_project_by_name(project_name)
+                if resolved_id:
+                    project_id = resolved_id
         
-        # Si no hay ID (sesión antigua) o es un nombre, intentar resolverlo
-        if not project_id or "-" not in str(project_id):
-            project_name = project_id or session.get("project", "")
-            resolved_id = await bot.jibble.get_project_by_name(project_name)
-            # Si no se puede resolver, usar el ID por defecto (nunca usar el nombre como ID)
-            if resolved_id:
-                project_id = resolved_id
-            elif JIBBLE_PROJECT_ID:
+        # Si no hay sesión local o no se pudo resolver el proyecto, consultar Jibble
+        if not project_id:
+            try:
+                entries = await bot.jibble.get_time_entries(jibble_person_id, limit=5)
+                if entries:
+                    # Buscar la última entrada "In" para obtener el proyecto
+                    for entry in entries:
+                        if str(entry.get("type", "")) in ["In", "0"]:  # In o posible valor numérico
+                            project_id = entry.get("projectId")
+                            break
+            except Exception as e:
+                print(f"⚠️ Error al consultar Jibble para obtener proyecto: {str(e)}")
+        
+        # Último recurso: usar el proyecto por defecto
+        if not project_id:
+            if JIBBLE_PROJECT_ID:
                 project_id = JIBBLE_PROJECT_ID
             else:
-                # Si no hay ID por defecto, no podemos continuar
                 await interaction.followup.send(
-                    "❌ No se pudo determinar el proyecto. Verifica tu configuración.",
+                    "❌ No se pudo determinar el proyecto activo. Verifica tu configuración.",
                     ephemeral=True
                 )
                 return
@@ -348,31 +381,71 @@ async def toggle_break(interaction: discord.Interaction):
         )
         return
 
-    # Obtener ID del proyecto
-    project_id = session.get("project_id")
-    if not project_id or "-" not in str(project_id):
-        project_name = project_id or session.get("project", "")
-        resolved_id = await bot.jibble.get_project_by_name(project_name)
-        # Si no se puede resolver, usar el ID por defecto (nunca usar el nombre como ID)
-        if resolved_id:
-            project_id = resolved_id
-        elif JIBBLE_PROJECT_ID:
+    # Obtener ID del proyecto - primero intentar desde sesión local
+    project_id = None
+    if session:
+        project_id = session.get("project_id")
+        if not project_id or "-" not in str(project_id):
+            project_name = project_id or session.get("project", "")
+            resolved_id = await bot.jibble.get_project_by_name(project_name)
+            if resolved_id:
+                project_id = resolved_id
+    
+    # Si no hay sesión local o no se pudo resolver el proyecto, consultar Jibble
+    if not project_id:
+        try:
+            entries = await bot.jibble.get_time_entries(jibble_person_id, limit=5)
+            if entries:
+                # Buscar la última entrada "In" para obtener el proyecto
+                for entry in entries:
+                    if str(entry.get("type", "")) in ["In", "0"]:  # In o posible valor numérico
+                        project_id = entry.get("projectId")
+                        break
+        except Exception as e:
+            print(f"⚠️ Error al consultar Jibble para obtener proyecto: {str(e)}")
+    
+    # Último recurso: usar el proyecto por defecto
+    if not project_id:
+        if JIBBLE_PROJECT_ID:
             project_id = JIBBLE_PROJECT_ID
         else:
-            # Si no hay ID por defecto, no podemos continuar
             await interaction.followup.send(
-                "❌ No se pudo determinar el proyecto. Asegúrate de haber hecho clockin primero.",
+                "❌ No se pudo determinar el proyecto activo. Asegúrate de haber hecho clockin primero.",
                 ephemeral=True
             )
             return
 
-    # Verificar si hay una pausa activa localmente
-    breaks = session.get("breaks", [])
-    is_on_break = breaks and "end" not in breaks[-1]
+    # Verificar si hay una pausa activa - SIEMPRE consultar Jibble primero para evitar desincronización
+    is_on_break = False
+    try:
+        entries = await bot.jibble.get_time_entries(jibble_person_id, limit=5)
+        if entries:
+            # Revisar la PRIMERA entrada (más reciente) para determinar el estado REAL en Jibble
+            first_entry = entries[0]
+            entry_type = str(first_entry.get("type", ""))
+            
+            # Si la entrada más reciente es StartBreak (tipo "StartBreak" o "2"), está en break
+            if entry_type in ["StartBreak", "startbreak", "STARTBREAK", "2"]:
+                is_on_break = True
+                print(f"🔍 Detectado: Usuario {interaction.user.name} está en BREAK según Jibble (tipo '{entry_type}')")
+            # Si es EndBreak, Out, o In, no está en break
+            elif entry_type in ["EndBreak", "endbreak", "ENDBREAK", "0", "Out", "out", "OUT", "1", "In", "in", "IN"]:
+                is_on_break = False
+                print(f"🔍 Detectado: Usuario {interaction.user.name} NO está en break según Jibble (tipo '{entry_type}')")
+            else:
+                print(f"⚠️ Tipo desconocido en break detection: '{entry_type}' - Asumiendo NO en break")
+                is_on_break = False
+    except Exception as e:
+        print(f"⚠️ Error al consultar estado de break en Jibble: {str(e)}")
+        # Fallback a estado local solo si falla la consulta a Jibble
+        if session:
+            breaks = session.get("breaks", [])
+            is_on_break = breaks and "end" not in breaks[-1]
+            print(f"⚠️ Usando estado local como fallback: is_on_break={is_on_break}")
 
     try:
         if is_on_break:
-            # Finalizar pausa -> EndBreak (Mapeado a 4 en la API)
+            # Finalizar pausa -> EndBreak (Mapeado a 0 en la API)
             result = await bot.jibble.create_time_entry(
                 person_id=jibble_person_id,
                 project_id=project_id,
@@ -381,14 +454,15 @@ async def toggle_break(interaction: discord.Interaction):
                 type="EndBreak"
             )
             if result:
-                bot.work_sessions.end_break(user_id)
+                if session:
+                    bot.work_sessions.end_break(user_id)
                 await interaction.followup.send("☕ Pausa finalizada y sincronizada con Jibble")
                 # Volver a rol Activo
                 await bot.update_user_role(interaction.user, "Active")
             else:
                 await interaction.followup.send("❌ Error al finalizar pausa en Jibble. Revisa la consola.", ephemeral=True)
         else:
-            # Iniciar pausa -> StartBreak (Mapeado a 3 en la API)
+            # Iniciar pausa -> StartBreak (Mapeado a 2 en la API)
             result = await bot.jibble.create_time_entry(
                 person_id=jibble_person_id,
                 project_id=project_id,
@@ -397,7 +471,8 @@ async def toggle_break(interaction: discord.Interaction):
                 type="StartBreak"
             )
             if result:
-                bot.work_sessions.start_break(user_id)
+                if session:
+                    bot.work_sessions.start_break(user_id)
                 await interaction.followup.send("⏸️ Pausa iniciada y sincronizada con Jibble")
                 # Cambiar a rol Break
                 await bot.update_user_role(interaction.user, "Break")
@@ -413,7 +488,32 @@ async def toggle_break(interaction: discord.Interaction):
             return
 
         # Sincronización robusta para fallos de estado en pausas
-        if "validation_failed" in str(error_code) or "invalid_interval" in str(error_code):
+        if "invalid_interval_startbreak_startbreak" in str(error_code):
+            # Ya estás en break en Jibble, sincronizar estado local
+            print(f"🔄 Auto-sync (Break): Usuario {interaction.user.name} ya estaba en break en Jibble. Sincronizando...")
+            if session and (not session.get("breaks") or "end" in session["breaks"][-1]):
+                bot.work_sessions.start_break(user_id)
+            await bot.update_user_role(interaction.user, "Break")
+            await interaction.followup.send(
+                "ℹ️ Ya estabas en pausa en Jibble. Estado local sincronizado.\n"
+                "Usa `/break` de nuevo para finalizar la pausa.", 
+                ephemeral=True
+            )
+            return
+        
+        elif "invalid_interval_endbreak_endbreak" in str(error_code) or "invalid_interval_endbreak" in str(error_code):
+            # Ya terminaste el break en Jibble, sincronizar estado local
+            print(f"🔄 Auto-sync (Break): Usuario {interaction.user.name} ya había terminado el break en Jibble. Sincronizando...")
+            if session and session.get("breaks") and "end" not in session["breaks"][-1]:
+                bot.work_sessions.end_break(user_id)
+            await bot.update_user_role(interaction.user, "Active")
+            await interaction.followup.send(
+                "ℹ️ Tu pausa ya había finalizado en Jibble. Estado local sincronizado.", 
+                ephemeral=True
+            )
+            return
+        
+        elif "validation_failed" in str(error_code) or "invalid_interval" in str(error_code):
              print(f"🔄 Auto-sync (Break): Error de validación detectado. Jibble y Discord están desincronizados.")
              await interaction.followup.send(
                  "⚠️ Jibble rechazó el cambio de estado (posible desincronización). "
@@ -421,6 +521,7 @@ async def toggle_break(interaction: discord.Interaction):
                  ephemeral=True
              )
              return
+
 
         await interaction.followup.send(f"❌ Error en pausa: {str(e)}", ephemeral=True)
 
@@ -484,38 +585,64 @@ async def status(interaction: discord.Interaction):
             return
 
         # Analizar entradas para determinar estado actual en Jibble
+        # Las entradas vienen ordenadas por tiempo descendente (más reciente primero)
         jibble_state = "Inactive"  # Por defecto
         last_in_time = None
         last_break_start_time = None
         project_name = "Desconocido"
 
-        for entry in entries:
+        # Imprimir las primeras entradas para debug
+        print(f"🔍 Analizando estado de Jibble para {interaction.user.name}:")
+        for i, entry in enumerate(entries[:3]):
             entry_type = str(entry.get("type", ""))
             entry_time = entry.get("time", "")
+            print(f"   Entrada {i+1}: Tipo='{entry_type}', Tiempo={entry_time}")
+
+        # La PRIMERA entrada (más reciente) determina el estado actual
+        if entries:
+            first_entry = entries[0]
+            first_type = str(first_entry.get("type", ""))
             
-            # Type "In" = In (Entrada) - probando con string
-            if entry_type == "In" or entry_type.lower() == "in":
-                if not last_in_time:  # Primera entrada "In" encontrada (más reciente)
-                    last_in_time = entry_time
-                    project_name = entry.get("projectName", "Desconocido")
-                    jibble_state = "Active"
-                break  # Ya encontramos la última entrada In
+            # Type "In" = Activo (trabajando)
+            if first_type in ["In", "in", "IN"]:
+                jibble_state = "Active"
+                last_in_time = first_entry.get("time", "")
+                project_name = first_entry.get("projectName", "Desconocido")
+                print(f"✅ Estado detectado: ACTIVE (tipo '{first_type}')")
             
-            # Type "1" = Out (Salida) - si aparece primero, significa que está inactivo
-            elif entry_type == "1":
+            # Type "Out" o "1" = Inactivo (salida)
+            elif first_type in ["Out", "out", "OUT", "1"]:
                 jibble_state = "Inactive"
-                break
+                print(f"✅ Estado detectado: INACTIVE (Out, tipo '{first_type}')")
             
-            # Type "2" = StartBreak (Inicio de pausa)
-            elif entry_type == "2":
-                if not last_break_start_time:
-                    last_break_start_time = entry_time
-                    jibble_state = "Break"
-                break
+            # Type "StartBreak" o "2" = En pausa
+            elif first_type in ["StartBreak", "startbreak", "STARTBREAK", "2"]:
+                jibble_state = "Break"
+                last_break_start_time = first_entry.get("time", "")
+                # Buscar el proyecto de la última entrada "In"
+                for entry in entries:
+                    entry_type_str = str(entry.get("type", ""))
+                    if entry_type_str in ["In", "in", "IN"]:
+                        project_name = entry.get("projectName", "Desconocido")
+                        break
+                print(f"✅ Estado detectado: BREAK (tipo '{first_type}')")
             
-            # Type "0" = EndBreak (Fin de pausa) - continuar buscando
-            elif entry_type == "0":
-                continue
+            # Type "EndBreak" o "0" = Activo (volvió del break)
+            elif first_type in ["EndBreak", "endbreak", "ENDBREAK", "0"]:
+                jibble_state = "Active"
+                # Buscar el proyecto de la última entrada "In"
+                for entry in entries:
+                    entry_type_str = str(entry.get("type", ""))
+                    if entry_type_str in ["In", "in", "IN"]:
+                        last_in_time = entry.get("time", "")
+                        project_name = entry.get("projectName", "Desconocido")
+                        break
+                print(f"✅ Estado detectado: ACTIVE (EndBreak, tipo '{first_type}')")
+            
+            else:
+                print(f"⚠️ Tipo de entrada desconocido: '{first_type}' - Asumiendo INACTIVE")
+                jibble_state = "Inactive"
+
 
         # Auto-sincronizar si Jibble muestra activo/break pero Discord no tiene sesión
         sync_message = ""
@@ -547,7 +674,7 @@ async def status(interaction: discord.Interaction):
             embed.add_field(name="Estado en Jibble", value="🔴 Inactivo", inline=True)
             if local_session:
                 embed.add_field(name="Estado Local", value="⚠️ Desincronizado (limpiando...)", inline=True)
-                bot.work_sessions.sessions.pop(user_id, None)  # Limpiar sesión local
+                bot.work_sessions.clear_session(user_id)  # Limpiar sesión local
         else:
             # Calcular tiempos si hay sesión local
             if local_session:
@@ -611,14 +738,17 @@ async def jibble_status(interaction: discord.Interaction):
             await interaction.followup.send("❌ No se encontraron entradas recientes en Jibble.", ephemeral=True)
             return
 
-        # Mapeo inverso corregido para coincidir con jibble_api.py
-        # "0": EndBreak, "1": Out, "2": StartBreak, "In": string
+        # Mapeo inverso actualizado para strings completos
         type_names = {
+            # Valores numéricos (por si acaso Jibble los devuelve)
             "0": "☕ Fin de Pausa (EndBreak)",
             "1": "🏁 Salida (Out)",
             "2": "⏸️ Inicio de Pausa (StartBreak)",
+            # Valores de string (formato actual de Jibble)
             "In": "▶️ Entrada (In)",
-            "Out": "🏁 Salida (Out)"
+            "Out": "🏁 Salida (Out)",
+            "StartBreak": "⏸️ Inicio de Pausa (StartBreak)",
+            "EndBreak": "☕ Fin de Pausa (EndBreak)"
         }
 
         description = "Últimas 5 entradas en Jibble:\n\n"
@@ -926,6 +1056,50 @@ async def admin_report(
         f"📊 Reportes administrativos se deben consultar directamente en el panel de Jibble para mayor detalle.",
         ephemeral=True
     )
+
+
+@bot.tree.command(name="check_roles", description="[Admin] Verificar los IDs y nombres de los roles configurados")
+async def check_roles(interaction: discord.Interaction):
+    """Comando de diagnóstico para verificar la configuración de roles"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "❌ No tienes permisos para ejecutar este comando.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        return
+
+    role_config = {
+        "Activo": ROLE_ACTIVE_ID,
+        "Break/Pausa": ROLE_BREAK_ID,
+        "Inactivo": ROLE_INACTIVE_ID
+    }
+
+    description = "**Configuración actual de roles:**\n\n"
+    
+    for config_name, role_id in role_config.items():
+        if role_id:
+            role = interaction.guild.get_role(int(role_id))
+            if role:
+                description += f"**{config_name}** (ID: `{role_id}`)\n"
+                description += f"└─ Nombre real en Discord: `{role.name}`\n\n"
+            else:
+                description += f"**{config_name}** (ID: `{role_id}`)\n"
+                description += f"└─ ❌ Rol no encontrado en el servidor\n\n"
+        else:
+            description += f"**{config_name}**: ⚠️ No configurado\n\n"
+
+    embed = discord.Embed(
+        title="🔍 Diagnóstico de Roles",
+        description=description,
+        color=discord.Color.blue()
+    )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ============================================

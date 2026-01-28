@@ -74,21 +74,19 @@ class JibbleAPI:
         if not token:
             return None
 
-        # Mapeo de tipos para Jibble v1 (Corregido basado en feedback del usuario):
-        # "0": EndBreak (Fin de Pausa) - Confirmado por usuario
-        # "1": Out (Salida) - Confirmado
-        # "2": StartBreak (Inicio de Pausa) - Confirmado por error "startbreak_startbreak"
-        # "In": Probando con string directo ya que valores numéricos no funcionan
+        # Mapeo de tipos para Jibble v1 (IMPORTANTE: Jibble devuelve strings pero ESPERA strings numéricos):
+        # Jibble API DEVUELVE: "In", "Out", "StartBreak", "EndBreak" (strings descriptivos)
+        # Jibble API ESPERA: "In" (string), "1", "2", "0" (strings numéricos para Out, StartBreak, EndBreak)
         type_mapping = {
-            "In": "In",
-            "Out": "1",
-            "StartBreak": "2",
-            "EndBreak": "0",
-            "Break": "2"
+            "In": "In",           # In se mantiene como string
+            "Out": "1",           # Out = "1" (string)
+            "StartBreak": "2",    # StartBreak = "2" (string)
+            "EndBreak": "0",      # EndBreak = "0" (string)
+            "Break": "2"          # Alias para StartBreak
         }
         
-        # Obtener el valor de mapeo y asegurar que sea string
-        final_type = str(type_mapping.get(type, type))
+        # Obtener el valor de mapeo
+        final_type = type_mapping.get(type, type)
 
         headers = {
             "Authorization": f"Bearer {token}",
@@ -183,10 +181,6 @@ class JibbleAPI:
                 if data and "value" in data:
                     return data["value"]
                 return None
-        except Exception as e:
-            print(f"❌ Error al obtener lista de personas: {str(e)}")
-            return None
-
         except Exception as e:
             print(f"❌ Error al obtener lista de personas: {str(e)}")
             return None
