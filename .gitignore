@@ -131,3 +131,13 @@ dmypy.json
 # Archivos específicos del proyecto
 user_mapping.json
 *.log
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -71,3 +71,10 @@ class WorkSession:
     def get_session(self, user_id: int) -> Optional[Dict]:
         """Obtener sesión activa"""
         return self.active_sessions.get(user_id)
+    
+    def clear_session(self, user_id: int) -> bool:
+        """Limpiar sesión activa sin registrar salida"""
+        if user_id in self.active_sessions:
+            del self.active_sessions[user_id]
+            return True
+        return False
