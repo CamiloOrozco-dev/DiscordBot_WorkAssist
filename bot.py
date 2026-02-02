@@ -16,7 +16,12 @@ from datetime import datetime
 from typing import Optional
 import json
 
-from src import JibbleAPI, WorkSession, DISCORD_BOT_TOKEN, USER_MAPPING_FILE, JIBBLE_PROJECT_ID, ROLE_ACTIVE_ID, ROLE_BREAK_ID, ROLE_INACTIVE_ID
+from src import (
+    JibbleAPI, WorkSession, DISCORD_BOT_TOKEN, USER_MAPPING_FILE, 
+    JIBBLE_PROJECT_ID, ROLE_ACTIVE_ID, ROLE_BREAK_ID, ROLE_INACTIVE_ID,
+    GITLAB_WEBHOOK_PORT, GITLAB_CHANNEL_ID, GITLAB_WEBHOOK_SECRET, 
+    GITLAB_ALLOWED_PROJECTS, start_webhook_server
+)
 
 
 # ============================================
@@ -52,10 +57,23 @@ class TimeTrackingBot(commands.Bot):
             json.dump(self.user_mapping, f, indent=2)
 
     async def setup_hook(self):
-        """Sincronizar comandos slash"""
+        """Sincronizar comandos slash y configurar servidor web"""
         # Sincronizar solo si hay cambios significativos o en desarrollo
         # await self.tree.sync() 
         print("Bot en proceso de configuración...")
+        
+        # Iniciar servidor de webhooks de GitLab
+        if GITLAB_CHANNEL_ID:
+            self.loop.create_task(
+                start_webhook_server(
+                    self, 
+                    GITLAB_WEBHOOK_PORT, 
+                    GITLAB_CHANNEL_ID, 
+                    GITLAB_WEBHOOK_SECRET
+                )
+            )
+        else:
+            print("⚠️ GITLAB_CHANNEL_ID no configurado. El servidor de webhooks no se iniciará correctamente para enviar mensajes.")
 
     async def on_ready(self):
         """Evento cuando el bot está listo"""
