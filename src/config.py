@@ -23,3 +23,12 @@ USER_MAPPING_FILE = os.path.join(os.path.dirname(__file__), "..", "user_mapping.
 ROLE_ACTIVE_ID = "1463582976150343761"
 ROLE_BREAK_ID = "1463583082702438615"
 ROLE_INACTIVE_ID = "1463998777055514746"
+
+# Configuración de GitLab
+GITLAB_WEBHOOK_PORT = int(os.getenv("GITLAB_WEBHOOK_PORT", 5000))
+GITLAB_CHANNEL_ID = os.getenv("GITLAB_CHANNEL_ID")
+GITLAB_WEBHOOK_SECRET = os.getenv("GITLAB_WEBHOOK_SECRET")
+
+# Lista de proyectos permitidos (separados por coma en .env)
+_allowed_projects_raw = os.getenv("GITLAB_ALLOWED_PROJECTS", "")
+GITLAB_ALLOWED_PROJECTS = [p.strip() for p in _allowed_projects_raw.split(",") if p.strip()]
