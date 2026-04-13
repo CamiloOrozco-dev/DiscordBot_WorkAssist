@@ -85,14 +85,13 @@ El bot incluye un servidor webhook que recibe eventos de GitLab y los publica en
    - Secret Token: El valor de `GITLAB_WEBHOOK_SECRET`
    - Triggers: Push events, Merge request events
 
-## Deployment en Railway.app
+## Deployment en Discloud.com
 
-Para desplegar en Railway (recomendado para exponer el servidor webhook):
+Para desplegar en Discloud:
 
-1. Crea una cuenta en [railway.app](https://railway.app)
-2. Conecta tu repositorio de GitHub
-3. Configura las variables de entorno en Railway
-4. Genera un dominio público en Settings → Networking
-5. Usa ese dominio para configurar los webhooks de GitLab
+1. El proyecto ya incluye el archivo `discloud.config` necesario.
+2. Sube todos los archivos (excepto `.venv` y `.git`) a la plataforma de Discloud.
+3. Configura las variables de entorno (del archivo `.env`) en el panel de Discloud.
+4. Para el webhook de GitLab, usa la URL proporcionada por Discloud (ej: `https://zoro-bot.discloud.app/gitlab`) y asegúrate de que el puerto coincida con la configuración del bot.
 
-Ver [railway_migration.md](railway_migration.md) para más detalles.
+Mas información en la [documentación de Discloud](https://docs.discloud.com/).
